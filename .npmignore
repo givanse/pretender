@@ -3,4 +3,5 @@ test
 rollup.config.js
 karma.conf.js
 *.md
+dist/index.js
 yarn.lock

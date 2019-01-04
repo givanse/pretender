@@ -1,7 +1,61 @@
 import self from './iife-self-placeholder';
-import RouteRecognizer from 'route-recognizer';
+import RouteRecognizer, { Params, QueryParams, Result } from 'route-recognizer';
 import FakeXMLHttpRequest from 'fake-xml-http-request';
 import * as FakeFetch from 'whatwg-fetch';
+
+type Url = {
+  host: string;
+  protocol: string; 
+  search: string; 
+  hash: string;
+  href: string;
+  pathname: string;
+  fullpath: string;
+}
+
+type RegistryVerbs = {
+  GET: RouteRecognizer;
+  PUT: RouteRecognizer;
+  POST: RouteRecognizer;
+  DELETE: RouteRecognizer;
+  PATCH: RouteRecognizer;
+  HEAD: RouteRecognizer;
+  OPTIONS: RouteRecognizer;
+};
+
+interface Constructable<T> {
+  new() : T;
+}
+
+type SetupCallback = (this: Server) => void;
+interface SetupConfig {
+  forcePassthrough: boolean;
+}
+type Config = SetupCallback | SetupConfig;
+
+type RequestHandler = (
+  urlExpression: string,
+  response: ResponseHandler,
+  async?: boolean
+) => ResponseHandler;
+
+type ResponseData = [number, { [k: string]: string }, string];
+
+interface ExtraRequestData {
+  params: Params;
+  queryParams: QueryParams;
+}
+
+type ResponseHandler = {(
+  request: FakeXMLHttpRequest | FakeRequest | ExtraRequestData
+): ResponseData | PromiseLike<ResponseData>;
+  numberOfCalls: number;
+  async: boolean;
+}
+
+type ServerCtx = {
+  pretender: Server | undefined;
+};
 
 /**
  * parseURL - decompose a URL into its parts
@@ -20,7 +74,7 @@ import * as FakeFetch from 'whatwg-fetch';
  *   fullpath: '/mypage?test=yes'
  * }
  */
-function parseURL(url) {
+function parseURL(url: string): Url {
   // TODO: something for when document isn't present... #yolo
   var anchor = document.createElement('a');
   anchor.href = url;
@@ -57,18 +111,23 @@ function parseURL(url) {
  * A registry is a map of HTTP verbs to route recognizers.
  */
 
-function Registry(/* host */) {
-  // Herein we keep track of RouteRecognizer instances
-  // keyed by HTTP method. Feel free to add more as needed.
-  this.verbs = {
-    GET: new RouteRecognizer(),
-    PUT: new RouteRecognizer(),
-    POST: new RouteRecognizer(),
-    DELETE: new RouteRecognizer(),
-    PATCH: new RouteRecognizer(),
-    HEAD: new RouteRecognizer(),
-    OPTIONS: new RouteRecognizer()
-  };
+class Registry {
+
+  public verbs: RegistryVerbs;
+
+  constructor(/* host */) {
+    // Herein we keep track of RouteRecognizer instances
+    // keyed by HTTP method. Feel free to add more as needed.
+    this.verbs = {
+      GET: new RouteRecognizer(),
+      PUT: new RouteRecognizer(),
+      POST: new RouteRecognizer(),
+      DELETE: new RouteRecognizer(),
+      PATCH: new RouteRecognizer(),
+      HEAD: new RouteRecognizer(),
+      OPTIONS: new RouteRecognizer()
+    };
+  }
 }
 
 /**
@@ -77,113 +136,298 @@ function Registry(/* host */) {
  * a map of hosts to Registries, ultimately allowing
  * a per-host-and-port, per HTTP verb lookup of RouteRecognizers
  */
-function Hosts() {
-  this._registries = {};
-}
+class Hosts {
 
-/**
- * Hosts#forURL - retrieve a map of HTTP verbs to RouteRecognizers
- *                for a given URL
- *
- * @param  {String} url a URL
- * @return {Registry}   a map of HTTP verbs to RouteRecognizers
- *                      corresponding to the provided URL's
- *                      hostname and port
- */
-Hosts.prototype.forURL = function(url) {
-  var host = parseURL(url).host;
-  var registry = this._registries[host];
+  private _registries: Object;
 
-  if (registry === undefined) {
-    registry = (this._registries[host] = new Registry(host));
+  constructor() {
+    this._registries = {};
   }
 
-  return registry.verbs;
-};
+  /**
+   * Hosts#forURL - retrieve a map of HTTP verbs to RouteRecognizers
+   *                for a given URL
+   *
+   * @param  {String} url a URL
+   * @return {Registry}   a map of HTTP verbs to RouteRecognizers
+   *                      corresponding to the provided URL's
+   *                      hostname and port
+   */
+  forURL(url: string): RegistryVerbs {
+    var host: string = parseURL(url).host;
+    var registry: Registry | undefined = this._registries[host];
 
-
-function Pretender(/* routeMap1, routeMap2, ..., options*/) {
-  this.hosts = new Hosts();
-
-  var lastArg = arguments[arguments.length - 1];
-  var options = typeof lastArg === 'object' ? lastArg : null;
-  var shouldNotTrack = options && (options.trackRequests === false);
-  var noopArray = { push: function() {}, length: 0 };
-
-  this.handlers = [];
-  this.handledRequests = shouldNotTrack ? noopArray: [];
-  this.passthroughRequests = shouldNotTrack ? noopArray: [];
-  this.unhandledRequests = shouldNotTrack ? noopArray: [];
-  this.requestReferences = [];
-  this.forcePassthrough = options && (options.forcePassthrough === true);
-  this.disableUnhandled = options && (options.disableUnhandled === true);
-
-  // reference the native XMLHttpRequest object so
-  // it can be restored later
-  this._nativeXMLHttpRequest = self.XMLHttpRequest;
-  this.running = false;
-  var ctx = { pretender: this };
-  this.ctx = ctx;
-
-  // capture xhr requests, channeling them into
-  // the route map.
-  self.XMLHttpRequest = interceptor(ctx);
-
-  // polyfill fetch when xhr is ready
-  this._fetchProps = FakeFetch ? ['fetch', 'Headers', 'Request', 'Response'] : [];
-  this._fetchProps.forEach(function(name) {
-    this['_native' + name] = self[name];
-    self[name] = FakeFetch[name];
-  }, this);
-
-  // 'start' the server
-  this.running = true;
-
-  // trigger the route map DSL.
-  var argLength = options ? arguments.length - 1 : arguments.length;
-  for (var i = 0; i < argLength; i++) {
-    this.map(arguments[i]);
-  }
-}
-
-function interceptor(ctx) {
-  function FakeRequest() {
-    // super()
-    FakeXMLHttpRequest.call(this);
-  }
-  FakeRequest.prototype = Object.create(FakeXMLHttpRequest.prototype);
-  FakeRequest.prototype.constructor = FakeRequest;
-
-  // extend
-  FakeRequest.prototype.send = function send() {
-    if (!ctx.pretender.running) {
-      throw new Error('You shut down a Pretender instance while there was a pending request. ' +
-            'That request just tried to complete. Check to see if you accidentally shut down ' +
-            'a pretender earlier than you intended to');
+    if (registry === undefined) {
+      registry = (this._registries[host] = new Registry(/*host*/));
     }
 
-    FakeXMLHttpRequest.prototype.send.apply(this, arguments);
+    return registry.verbs;
+  }
+}
 
-    if (ctx.pretender.checkPassthrough(this)) {
-      var xhr = createPassthrough(this);
-      xhr.send.apply(xhr, arguments);
+
+class Server {
+
+  public static parseURL;
+  public static Hosts;
+  public static Registry;
+
+  //public _nativeXMLHttpRequest: Constructable<XMLHttpRequest>;
+  public _nativeXMLHttpRequest: Constructable<XMLHttpRequest>;
+  public ctx: ServerCtx;
+  public running: boolean;
+
+  private _fetchProps;
+  private disableUnhandled;
+  private forcePassthrough;
+  private handledRequests;
+  private handlers: ResponseHandler[];
+  private hosts;
+  private passthroughRequests;
+  private requestReferences;
+  private unhandledRequests;
+
+  // @ts-ignore
+  constructor(config?: Config) {
+    this.hosts = new Hosts();
+
+    var lastArg = arguments[arguments.length - 1];
+    var options = typeof lastArg === 'object' ? lastArg : null;
+    var shouldNotTrack = options && (options.trackRequests === false);
+    var noopArray = { push: function() {}, length: 0 };
+
+    this.handlers = [];
+    this.handledRequests = shouldNotTrack ? noopArray: [];
+    this.passthroughRequests = shouldNotTrack ? noopArray: [];
+    this.unhandledRequests = shouldNotTrack ? noopArray: [];
+    this.requestReferences = [];
+    this.forcePassthrough = options && (options.forcePassthrough === true);
+    this.disableUnhandled = options && (options.disableUnhandled === true);
+
+    // reference the native XMLHttpRequest object so
+    // it can be restored later
+    this._nativeXMLHttpRequest = self.XMLHttpRequest;
+    this.running = false;
+    var ctx = { pretender: this };
+    this.ctx = ctx;
+
+    // capture xhr requests, channeling them into
+    // the route map.
+    self.XMLHttpRequest = interceptor(ctx);
+
+    // polyfill fetch when xhr is ready
+    this._fetchProps = FakeFetch ? ['fetch', 'Headers', 'Request', 'Response'] : [];
+    this._fetchProps.forEach(function(name) {
+      this['_native' + name] = self[name];
+      self[name] = FakeFetch[name];
+    }, this);
+
+    // 'start' the server
+    this.running = true;
+
+    // trigger the route map DSL.
+    var argLength = options ? arguments.length - 1 : arguments.length;
+    for (var i = 0; i < argLength; i++) {
+      this.map(arguments[i]);
+    }
+  }
+  get = verbify('GET');
+  post = verbify('POST');
+  put = verbify('PUT');
+  public delete: RequestHandler;
+  patch = verbify('PATCH');
+  head = verbify('HEAD');
+  options = verbify('OPTIONS');
+  map(maps) {
+    maps.call(this);
+  }
+  register(verb: string, url: string, handler: ResponseHandler, async: boolean): ResponseHandler {
+    if (!handler) {
+      throw new Error('The function you tried passing to Pretender to handle ' +
+        verb + ' ' + url + ' is undefined or missing.');
+    }
+
+    handler.numberOfCalls = 0;
+    handler.async = async;
+    this.handlers.push(handler);
+
+    var registry = this.hosts.forURL(url)[verb];
+
+    registry.add([{
+      path: parseURL(url).fullpath,
+      handler: handler
+    }]);
+
+    return handler;
+  }
+  passthrough = PASSTHROUGH;
+  checkPassthrough(request) {
+    var verb = request.method.toUpperCase();
+    var path = parseURL(request.url).fullpath;
+    var recognized = this.hosts.forURL(request.url)[verb].recognize(path);
+    var match = recognized && recognized[0];
+
+    if ((match && match.handler === PASSTHROUGH) || this.forcePassthrough)  {
+      this.passthroughRequests.push(request);
+      this.passthroughRequest(verb, path, request);
+      return true;
+    }
+
+    return false;
+  }
+  handleRequest(request: FakeRequest): void {
+    var verb = request.method.toUpperCase();
+    var path = request.url;
+
+    var handler = this._handlerFor(verb, path, request);
+
+    if (handler) {
+      // @ts-ignore, err 'numberOfCalls' does not exist on type 'Opaque'
+      handler.handler.numberOfCalls++;
+      // @ts-ignore, err 'async' does not exist on type 'Opaque'
+      var async = handler.handler.async;
+      this.handledRequests.push(request);
+
+      var pretender = this;
+
+      var _handleRequest = function(statusHeadersAndBody) {
+        if (!isArray(statusHeadersAndBody)) {
+          var note = 'Remember to `return [status, headers, body];` in your route handler.';
+          throw new Error('Nothing returned by handler for ' + path + '. ' + note);
+        }
+
+        var status = statusHeadersAndBody[0];
+        var headers = pretender.prepareHeaders(statusHeadersAndBody[1]);
+        var body = pretender.prepareBody(statusHeadersAndBody[2]);
+
+        pretender.handleResponse(request, async, function() {
+          request.respond(status, headers, body);
+          pretender.handledRequest(verb, path, request);
+        });
+      };
+
+      try {
+        // @ts-ignore 
+        var result = handler.handler(request);
+        if (result && typeof result.then === 'function') {
+          // `result` is a promise, resolve it
+          result.then(function(resolvedResult) {
+            _handleRequest(resolvedResult);
+          });
+        } else {
+          _handleRequest(result);
+        }
+      } catch (error) {
+        this.erroredRequest(verb, path, request, error);
+        this.resolve(request);
+      }
     } else {
-      ctx.pretender.handleRequest(this);
+      if (!this.disableUnhandled) {
+        this.unhandledRequests.push(request);
+        this.unhandledRequest(verb, path, request);
+      }
     }
-  };
+  }
+  handleResponse(request, strategy, callback) {
+    var delay = typeof strategy === 'function' ? strategy() : strategy;
+    delay = typeof delay === 'boolean' || typeof delay === 'number' ? delay : 0;
 
+    if (delay === false) {
+      callback();
+    } else {
+      var pretender = this;
+      pretender.requestReferences.push({
+        request: request,
+        callback: callback
+      });
 
-  function createPassthrough(fakeXHR) {
+      if (delay !== true) {
+        scheduleProgressEvent(request, new Date(), delay);
+        setTimeout(function() {
+          pretender.resolve(request);
+        }, delay);
+      }
+    }
+  }
+  resolve(request) {
+    for (var i = 0, len = this.requestReferences.length; i < len; i++) {
+      var res = this.requestReferences[i];
+      if (res.request === request) {
+        res.callback();
+        this.requestReferences.splice(i, 1);
+        break;
+      }
+    }
+  }
+  requiresManualResolution(verb: string, path: string): boolean {
+    var handler = this._handlerFor(verb.toUpperCase(), path, {} as FakeRequest);
+    if (!handler) { return false; }
+
+    // @ts-ignore, err 'async' does not exist on type 'Opaque'
+    var async = handler.handler.async;
+    return typeof async === 'function' ? async() === true : async === true;
+  }
+  prepareBody(body) { return body; }
+  prepareHeaders(headers) { return headers; }
+  // @ts-ignore
+  handledRequest(verb, path, request) { /* no-op */ }
+  // @ts-ignore
+  passthroughRequest(verb, path, request) { /* no-op */ }
+  // @ts-ignore
+  unhandledRequest(verb, path, request) {
+    throw new Error('Pretender intercepted ' + verb + ' ' +
+      path + ' but no handler was defined for this type of request');
+  }
+  // @ts-ignore
+  erroredRequest(verb, path, request, error) {
+    error.message = 'Pretender intercepted ' + verb + ' ' +
+      path + ' but encountered an error: ' + error.message;
+    throw error;
+  }
+  _handlerFor(verb: string, url: string, request: FakeRequest | ExtraRequestData): Result | null {
+    var registry = this.hosts.forURL(url)[verb];
+    var matches = registry.recognize(parseURL(url).fullpath);
+
+    var match = matches ? matches[0] : null;
+    if (match) {
+      request.params = match.params;
+      request.queryParams = matches.queryParams;
+    }
+
+    return match;
+  }
+  shutdown() {
+    self.XMLHttpRequest = this._nativeXMLHttpRequest;
+    this._fetchProps.forEach(function(name) {
+      self[name] = this['_native' + name];
+    }, this);
+    this.ctx.pretender = undefined;
+    // 'stop' the server
+    this.running = false;
+  }
+}
+
+Server.prototype.delete = verbify('DELETE');
+
+class FakeRequest extends FakeXMLHttpRequest {
+
+  public static ctx: ServerCtx;
+
+  public _passthroughRequest: XMLHttpRequest;
+  public params: Params;
+  public queryParams: QueryParams;
+
+  static createPassthrough(fakeXHR: FakeRequest): XMLHttpRequest {
     // event types to handle on the xhr
     var evts = ['error', 'timeout', 'abort', 'readystatechange'];
 
     // event types to handle on the xhr.upload
-    var uploadEvents = [];
+    var uploadEvents: string[]  = [];
 
     // properties to copy from the native xhr to fake xhr
     var lifecycleProps = ['readyState', 'responseText', 'responseXML', 'status', 'statusText'];
 
-    var xhr = fakeXHR._passthroughRequest = new ctx.pretender._nativeXMLHttpRequest();
+    var xhr = fakeXHR._passthroughRequest = new FakeRequest.ctx.pretender._nativeXMLHttpRequest();
     xhr.open(fakeXHR.method, fakeXHR.url, fakeXHR.async, fakeXHR.username, fakeXHR.password);
 
     if (fakeXHR.responseType === 'arraybuffer') {
@@ -214,7 +458,7 @@ function interceptor(ctx) {
     }
 
     // fire fake event on `eventable`
-    function dispatchEvent(eventable, eventType, event) {
+    function dispatchEvent(eventable, eventType: string, event) {
       eventable.dispatchEvent(event);
       if (eventable['on' + eventType]) {
         eventable['on' + eventType](event);
@@ -231,7 +475,7 @@ function interceptor(ctx) {
 
     // set the on- handler on the native xhr's `upload` property for
     // the given eventType
-    function createUploadHandler(eventType) {
+    function createUploadHandler(eventType: string) {
       if (xhr.upload) {
         xhr.upload['on' + eventType] = function(event) {
           dispatchEvent(fakeXHR.upload, eventType, event);
@@ -239,7 +483,7 @@ function interceptor(ctx) {
       }
     }
 
-    var i;
+    var i: number;
     for (i = 0; i < evts.length; i++) {
       createHandler(evts[i]);
     }
@@ -257,36 +501,58 @@ function interceptor(ctx) {
     return xhr;
   }
 
-  FakeRequest.prototype._passthroughCheck = function(method, args) {
+  send(/*data*/) {
+    if (!FakeRequest.ctx.pretender.running) {
+      throw new Error('You shut down a Pretender instance while there was a pending request. ' +
+            'That request just tried to complete. Check to see if you accidentally shut down ' +
+            'a pretender earlier than you intended to');
+    }
+
+    super.send.apply(this, arguments);
+
+    if (FakeRequest.ctx.pretender.checkPassthrough(this)) {
+      var xhr = FakeRequest.createPassthrough(this);
+      xhr.send.apply(xhr, arguments);
+    } else {
+      FakeRequest.ctx.pretender.handleRequest(this);
+    }
+  }
+
+  _passthroughCheck(method, args) {
     if (this._passthroughRequest) {
       return this._passthroughRequest[method].apply(this._passthroughRequest, args);
     }
     return FakeXMLHttpRequest.prototype[method].apply(this, args);
-  };
+  }
 
-  FakeRequest.prototype.abort = function abort() {
+  abort() {
     return this._passthroughCheck('abort', arguments);
-  };
+  }
 
-  FakeRequest.prototype.getResponseHeader = function getResponseHeader() {
+  getResponseHeader() {
     return this._passthroughCheck('getResponseHeader', arguments);
-  };
+  }
 
-  FakeRequest.prototype.getAllResponseHeaders = function getAllResponseHeaders() {
+  getAllResponseHeaders() {
     return this._passthroughCheck('getAllResponseHeaders', arguments);
   };
+}
 
+function interceptor(ctx: ServerCtx) {
   if (ctx.pretender._nativeXMLHttpRequest.prototype._passthroughCheck) {
     console.warn('You created a second Pretender instance while there was already one running. ' +
           'Running two Pretender servers at once will lead to unexpected results and will ' +
           'be removed entirely in a future major version.' +
           'Please call .shutdown() on your instances when you no longer need them to respond.');
   }
+
+  FakeRequest.ctx = ctx;
+
   return FakeRequest;
 }
 
-function verbify(verb) {
-  return function(path, handler, async) {
+function verbify(verb: string) {
+  return function(path: string, handler: ResponseHandler, async: boolean): ResponseHandler {
     return this.register(verb, path, handler, async);
   };
 }
@@ -302,183 +568,14 @@ function scheduleProgressEvent(request, startTime, totalTime) {
   }, 50);
 }
 
-function isArray(array) {
+function isArray(array: any) {
   return Object.prototype.toString.call(array) === '[object Array]';
 }
 
 var PASSTHROUGH = {};
 
-Pretender.prototype = {
-  get: verbify('GET'),
-  post: verbify('POST'),
-  put: verbify('PUT'),
-  'delete': verbify('DELETE'),
-  patch: verbify('PATCH'),
-  head: verbify('HEAD'),
-  options: verbify('OPTIONS'),
-  map: function(maps) {
-    maps.call(this);
-  },
-  register: function register(verb, url, handler, async) {
-    if (!handler) {
-      throw new Error('The function you tried passing to Pretender to handle ' +
-        verb + ' ' + url + ' is undefined or missing.');
-    }
+Server.parseURL = parseURL;
+Server.Hosts = Hosts;
+Server.Registry = Registry;
 
-    handler.numberOfCalls = 0;
-    handler.async = async;
-    this.handlers.push(handler);
-
-    var registry = this.hosts.forURL(url)[verb];
-
-    registry.add([{
-      path: parseURL(url).fullpath,
-      handler: handler
-    }]);
-
-    return handler;
-  },
-  passthrough: PASSTHROUGH,
-  checkPassthrough: function checkPassthrough(request) {
-    var verb = request.method.toUpperCase();
-    var path = parseURL(request.url).fullpath;
-    var recognized = this.hosts.forURL(request.url)[verb].recognize(path);
-    var match = recognized && recognized[0];
-
-    if ((match && match.handler === PASSTHROUGH) || this.forcePassthrough)  {
-      this.passthroughRequests.push(request);
-      this.passthroughRequest(verb, path, request);
-      return true;
-    }
-
-    return false;
-  },
-  handleRequest: function handleRequest(request) {
-    var verb = request.method.toUpperCase();
-    var path = request.url;
-
-    var handler = this._handlerFor(verb, path, request);
-
-    if (handler) {
-      handler.handler.numberOfCalls++;
-      var async = handler.handler.async;
-      this.handledRequests.push(request);
-
-      var pretender = this;
-
-      var _handleRequest = function(statusHeadersAndBody) {
-        if (!isArray(statusHeadersAndBody)) {
-          var note = 'Remember to `return [status, headers, body];` in your route handler.';
-          throw new Error('Nothing returned by handler for ' + path + '. ' + note);
-        }
-
-        var status = statusHeadersAndBody[0],
-            headers = pretender.prepareHeaders(statusHeadersAndBody[1]),
-            body = pretender.prepareBody(statusHeadersAndBody[2], headers);
-
-        pretender.handleResponse(request, async, function() {
-          request.respond(status, headers, body);
-          pretender.handledRequest(verb, path, request);
-        });
-      };
-
-      try {
-        var result = handler.handler(request);
-        if (result && typeof result.then === 'function') {
-          // `result` is a promise, resolve it
-          result.then(function(resolvedResult) {
-            _handleRequest(resolvedResult);
-          });
-        } else {
-          _handleRequest(result);
-        }
-      } catch (error) {
-        this.erroredRequest(verb, path, request, error);
-        this.resolve(request);
-      }
-    } else {
-      if (!this.disableUnhandled) {
-        this.unhandledRequests.push(request);
-        this.unhandledRequest(verb, path, request);
-      }
-    }
-  },
-  handleResponse: function handleResponse(request, strategy, callback) {
-    var delay = typeof strategy === 'function' ? strategy() : strategy;
-    delay = typeof delay === 'boolean' || typeof delay === 'number' ? delay : 0;
-
-    if (delay === false) {
-      callback();
-    } else {
-      var pretender = this;
-      pretender.requestReferences.push({
-        request: request,
-        callback: callback
-      });
-
-      if (delay !== true) {
-        scheduleProgressEvent(request, new Date(), delay);
-        setTimeout(function() {
-          pretender.resolve(request);
-        }, delay);
-      }
-    }
-  },
-  resolve: function resolve(request) {
-    for (var i = 0, len = this.requestReferences.length; i < len; i++) {
-      var res = this.requestReferences[i];
-      if (res.request === request) {
-        res.callback();
-        this.requestReferences.splice(i, 1);
-        break;
-      }
-    }
-  },
-  requiresManualResolution: function(verb, path) {
-    var handler = this._handlerFor(verb.toUpperCase(), path, {});
-    if (!handler) { return false; }
-
-    var async = handler.handler.async;
-    return typeof async === 'function' ? async() === true : async === true;
-  },
-  prepareBody: function(body) { return body; },
-  prepareHeaders: function(headers) { return headers; },
-  handledRequest: function(/* verb, path, request */) { /* no-op */},
-  passthroughRequest: function(/* verb, path, request */) { /* no-op */},
-  unhandledRequest: function(verb, path/*, request */) {
-    throw new Error('Pretender intercepted ' + verb + ' ' +
-      path + ' but no handler was defined for this type of request');
-  },
-  erroredRequest: function(verb, path, request, error) {
-    error.message = 'Pretender intercepted ' + verb + ' ' +
-      path + ' but encountered an error: ' + error.message;
-    throw error;
-  },
-  _handlerFor: function(verb, url, request) {
-    var registry = this.hosts.forURL(url)[verb];
-    var matches = registry.recognize(parseURL(url).fullpath);
-
-    var match = matches ? matches[0] : null;
-    if (match) {
-      request.params = match.params;
-      request.queryParams = matches.queryParams;
-    }
-
-    return match;
-  },
-  shutdown: function shutdown() {
-    self.XMLHttpRequest = this._nativeXMLHttpRequest;
-    this._fetchProps.forEach(function(name) {
-      self[name] = this['_native' + name];
-    }, this);
-    this.ctx.pretender = undefined;
-    // 'stop' the server
-    this.running = false;
-  }
-};
-
-Pretender.parseURL = parseURL;
-Pretender.Hosts = Hosts;
-Pretender.Registry = Registry;
-
-export default Pretender;
+export default Server;

@@ -1,16 +1,16 @@
 {
   "name": "pretender",
-  "version": "2.1.0",
-  "main": "./dist/pretender.js",
-  "module": "./src/pretender.es.js",
-  "types": "index.d.ts",
+  "version": "2.1.1",
+  "main": "dist/pretender.js",
+  "module": "src/pretender.es.js",
+  "types": "dist/index.d.ts",
   "description": "Pretender is a mock server library for XMLHttpRequest and Fetch, that comes with an express/sinatra style syntax for defining routes and their handlers.",
   "license": "MIT",
   "engines": {
     "node": "6.* || 8.* || 10.* || >= 11.*"
   },
   "scripts": {
-    "prepublishOnly": "npm run build && npm run tests-only",
+    "prepublishOnly": "npm run tsc:d && npm run build && npm run tests-only",
     "pretest": "bower install",
     "build": "rollup --config",
     "test": "npm run lint && npm run jscs && npm run tests-only",
@@ -19,7 +19,8 @@
     "tests-only-ci": "karma start --single-run --browsers PhantomJS",
     "lint": "jshint test",
     "jscs": "jscs test",
-    "test:server": "karma start --no-single-run"
+    "test:server": "karma start --no-single-run",
+    "tsc:d": "rimraf dist/index.d.ts && tsc --declaration --noEmit false --outDir dist && rimraf dist/index.js"
   },
   "repository": {
     "type": "git",
@@ -40,6 +41,7 @@
     "karma-sinon": "^1.0.5",
     "phantomjs": "^2.1.7",
     "qunit": "^2.6.1",
+    "rimraf": "^2.6.3",
     "rollup": "0.68.2",
     "rollup-plugin-commonjs": "^9.2.0",
     "rollup-plugin-multi-entry": "^2.1.0",
